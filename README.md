@@ -1,1 +1,1 @@
-# ipv6-check
+# Check ipv4 and ipv6 configuration
