@@ -15,7 +15,7 @@ parser.add_argument('--interface', help='多网卡时指定父接口，如 ens3�
 parser.add_argument('--subnet', help='可选：填写服务商明确分配给实例使用的 CIDR；脚本只验证格式，不验证归属')
 parser.add_argument('--no-external', action='store_true', help='不向公网服务发送请求，仅检查本地地址/路由')
 parser.add_argument('--non-interactive', action='store_true', help='不提问，仅检测')
-parser.add_argument('--mode', type=int, choices=[1,2,3,4,5], help='网络模式编号，见运行时说明')
+parser.add_argument('--mode', type=int, choices=[1,2,3,4,5], help='1=IPv4 NAT；2=IPv4/IPv6 NAT；3=IPv4 NAT+独立IPv6；4=IPv6 Only；5=IPv6 NAT')
 args = parser.parse_args()
 tty = None
 if not args.non_interactive:
@@ -35,10 +35,11 @@ def ask(prompt, default='', validate=None):
         tty.write('输入无效，请重新填写。\n')
 mode_names = {1:'IPv4 NAT + IPv6（独立子网）',2:'IPv4 NAT + IPv6 NAT',3:'IPv4 NAT',4:'IPv6 Only（独立子网）',5:'IPv6 NAT'}
 print('\n=== 服务器网络填写引导 ===\n只读取地址和路由，不修改系统；请在节点宿主机运行。')
-for key in [3,2,1,4,5]: print('  ' + str(key) + '. ' + mode_names[key])
-mode = args.mode or int(ask('第 1 步：选择网络模式', '3', lambda v:v in ['1','2','3','4','5']))
-if tty is not None and not args.no_external:
-    args.no_external = ask('是否通过 HTTPS 检测公网出口？服务仅收到出口 IP（y/n）', 'y', lambda v:v.lower() in ['y','n']).lower() == 'n'
+menu_modes = {1:3,2:2,3:1,4:4,5:5}
+for key in range(1,6): print('  ' + str(key) + '. ' + mode_names[menu_modes[key]])
+selection = args.mode or int(ask('请选择网络模式', '1', lambda v:v in ['1','2','3','4','5']))
+mode = menu_modes[selection]
+if not args.no_external: print('将自动通过 HTTPS 检测公网出口，无需额外确认。')
 print('\n第 2 步：读取本机地址与出口路由…')
 
 def run_json(cmd):
@@ -202,48 +203,28 @@ def paint(value, color):
     return colors[color] + value + '\033[0m' if color_enabled else value
 def field(label, value, color):
     print('  ' + paint(label + '：', 'cyan') + paint(value, color))
-def v4_global(value):
-    try:
-        ip = ipaddress.ip_address(value)
-        return ip.version == 4 and ip.is_global and not ip.is_multicast
-    except ValueError: return False
-def connection_valid(value):
-    try:
-        ipaddress.ip_address(value)
-        return True
-    except ValueError:
-        import re
-        return bool(re.fullmatch(r'(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*', value))
-def subnet_valid(value):
-    if not value: return True
-    try:
-        net = ipaddress.ip_network(value, strict=True)
-        return net.version == 6 and net.prefixlen <= 64 and public(net.network_address)
-    except ValueError: return False
-print('\n第 3 步：确认填写值。回车采用建议；auto 表示表单留空自动选择。')
-connection = ask('连接地址：面板访问节点 API 的 IP 或域名，不带协议/端口', v4_public or external or source or v4_src or '',lambda v:not v or connection_valid(v))
-public4 = ask('公网 IPv4：用户实际访问的公网地址',v4_public or '',lambda v:not v or v4_global(v)) if mode in [1,2,3] else ''
-bind4 = ask('监听 IPv4：必须是本机已有地址，或 auto',v4_src or 'auto',lambda v:v=='auto' or v in valid_v4) if mode in [1,2,3] else ''
-if mode in [1,4]:
-    print(paint('子网候选不等于地址池；服务商确认允许分配给实例后再填写。','yellow'))
-    subnet_input=ask('服务商确认的 IPv6 子网；尚未确认请留空',str(declared) if declared else '',subnet_valid)
-else: subnet_input=''
-parent = ask('IPv6 父接口',iface or '',lambda v:not v or v in links) if mode in [1,4] else ''
-public6 = ask('公网 IPv6：用户实际访问的地址',external or source or '',lambda v:not v or public(v)) if mode in [1,2,4,5] else ''
-valid_v6={item['address'] for item in addresses}
-bind6 = ask('监听 IPv6：必须是本机已有地址，或 auto',source or 'auto',lambda v:v=='auto' or v in valid_v6) if mode in [1,2,4,5] else ''
+print('\n第 3 步：自动生成填写参考，无需逐项输入。')
+connection = v4_public or external or source or v4_src or ''
+public4 = (v4_public or '') if mode in [1,2,3] else ''
+bind4 = (v4_src or 'auto') if mode in [1,2,3] else ''
+parent = (iface or '') if mode in [1,4] else ''
+public6 = (external or source or '') if mode in [1,2,4,5] else ''
+bind6 = (source or 'auto') if mode in [1,2,4,5] else ''
+estimated_subnet = str(ipaddress.ip_network(public6 + '/64', strict=False)) if public6 and mode in [1,4] else ''
+subnet_input = str(declared) if declared and mode in [1,4] else estimated_subnet
 print('\n'+paint('━━ 最终表单填写参考 ━━','cyan'))
 field('网络模式',mode_names[mode],'cyan')
 field('连接地址',connection or '未检测到，请手动填写','green' if connection else 'red')
 field('API 端口','8443（表单默认值，请按实际配置填写）','yellow')
 field('公网 IPv4',public4 or ('未检测到' if mode in [1,2,3] else '此模式无需填写'),'green' if public4 and v4_verified and public4==v4_public else 'yellow' if public4 else 'red' if mode in [1,2,3] else 'cyan')
 field('监听 IPv4','留空（自动选择）' if bind4=='auto' else bind4 or '此模式无需填写','green' if bind4 else 'cyan')
-field('IPv6 子网',subnet_input+'（按你提供的信息记录，未验证服务商授权）' if subnet_input else ('待服务商确认，暂勿提交独立 IPv6 配置' if mode in [1,4] else '此模式无需填写'),'yellow' if mode in [1,4] else 'cyan')
+field('IPv6 子网',subnet_input + ('（命令参数提供；需向服务商确认）' if declared else '（按公网 IPv6 估算 /64；需向服务商确认）') if subnet_input else ('未检测到公网 IPv6，无法估算' if mode in [1,4] else '此模式无需填写'),'yellow' if mode in [1,4] else 'cyan')
 field('IPv6 父接口',parent or ('未检测到' if mode in [1,4] else '此模式无需填写'),'green' if parent else 'red' if mode in [1,4] else 'cyan')
 field('公网 IPv6',public6 or ('未检测到' if mode in [1,2,4,5] else '此模式无需填写'),'green' if public6 and public6==external else 'yellow' if public6 else 'red' if mode in [1,2,4,5] else 'cyan')
 field('监听 IPv6','留空（自动选择）' if bind6=='auto' else bind6 or '此模式无需填写','yellow' if selected and selected['temporary'] else 'green' if bind6 else 'cyan')
 print('\n'+paint('绿色：检测到或已选择；黄色：候选/需核实；红色：缺少信息；青色：说明。','cyan'))
-print('面板到节点的连通性、服务商授权、上游路由/NDP及入站端口仍需实际确认。')
+print('估算 /64 不代表服务商已分配整个地址段；实际可能仅提供一个 /128，请确认后再用于实例分配。')
+print('面板到节点的连通性、上游路由/NDP及入站端口仍需实际确认。')
 print('脚本未开放端口、修改配置或创建网络。')
 if tty is not None:
     tty.close()
